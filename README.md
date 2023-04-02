@@ -66,3 +66,17 @@ Maelstrom will check to make sure several anomalies do not occur:
   --time-limit 20 \
   --rate 1000
 ```
+
+### Challenge #5b: Multi-Node Kafka-Style Log
+
+This challenge works the same as the single-node except that it's now running with two nodes. All correctness checks in Maelstrom should pass.
+
+```bash
+# Make sure to replace `~/go/bin/maelstrom-kafka`
+# with the full path of the executable you built above
+./maelstrom test -w kafka --bin ~/go/bin/maelstrom-kafka \
+  --node-count 2 \
+  --concurrency 2n \
+  --time-limit 20 \
+  --rate 1000
+```
