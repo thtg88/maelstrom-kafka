@@ -21,6 +21,9 @@ const (
 
 	ListCommittedOffsetsType   = "list_committed_offsets"
 	ListCommittedOffsetsOkType = "list_committed_offsets_ok"
+
+	ReplicateSendType   = "replicate_send"
+	ReplicateSendOkType = "replicate_send_ok"
 )
 
 // RPC: `send`
@@ -131,6 +134,30 @@ type ListCommittedOffsetsOkBody struct {
 	Offsets map[string]int `json:"offsets"`
 }
 
+// We add a `replicate` message so that we can propagate our msg at the specific offset to other nodes
+// We don't have a topology given to us at the beginning of the test from Maelstrom
+// So we assume we replicate to all nodes in the topology 🥵
+// {
+// 	"type": "replicate",
+// 	"msg": 12345,
+//  "offset": 1
+// }
+// and it will need to return a "replicate_ok" acknowledgment message:
+// {
+// 	"type": "replicate_ok"
+// }
+
+type ReplicateSendBody struct {
+	Type   string `json:"type"`
+	Key    string `json:"key"`
+	Msg    int    `json:"msg"`
+	Offset int    `json:"offset"`
+}
+
+type ReplicateSendOkBody struct {
+	Type string `json:"type"`
+}
+
 func main() {
 	type logs struct {
 		mutex sync.RWMutex
@@ -197,6 +224,23 @@ func main() {
 		if err != nil {
 			return err
 		}
+
+		// Replicate send msg to other nodes
+		go func(key string, offset int, msg int) {
+			for _, nodeID := range node.NodeIDs() {
+				// Don't replicate to ourselves lol
+				if node.ID() == nodeID {
+					continue
+				}
+
+				node.Send(nodeID, ReplicateSendBody{
+					Type:   ReplicateSendType,
+					Key:    key,
+					Msg:    msg,
+					Offset: offset,
+				})
+			}
+		}(body.Key, offset, body.Msg)
 
 		offset++
 
@@ -312,7 +356,61 @@ func main() {
 		})
 	})
 
+	node.Handle(ReplicateSendType, func(msg maelstrom.Message) error {
+		var body ReplicateSendBody
+
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+
+		uncommitted.mutex.Lock()
+		defer uncommitted.mutex.Unlock()
+
+		if _, ok := uncommitted.msgs[body.Key]; !ok {
+			uncommitted.msgs[body.Key] = make(map[int]int)
+		}
+
+		if _, ok := uncommitted.offsets[body.Key]; !ok {
+			uncommitted.offsets[body.Key] = 0
+		}
+
+		offset := uncommitted.offsets[body.Key]
+
+		if _, ok := uncommitted.msgs[body.Key][offset]; !ok {
+			uncommitted.msgs[body.Key][offset] = body.Msg
+
+			// Make sure we take back the offset so the replicated message can get committed
+			uncommitted.offsets[body.Key] = min(offset, uncommitted.offsets[body.Key])
+		}
+
+		return node.Reply(msg, ReplicateSendOkBody{
+			Type: ReplicateSendOkType,
+		})
+	})
+
+	node.Handle(ReplicateSendOkType, func(msg maelstrom.Message) error {
+		return nil
+	})
+
 	if err := node.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// max returns the larger of x or y.
+// func max(x int, y int) int {
+// 	if x < y {
+// 		return y
+// 	}
+
+// 	return x
+// }
+
+// min returns the smaller of x or y.
+func min(x int, y int) int {
+	if x < y {
+		return x
+	}
+
+	return y
 }
